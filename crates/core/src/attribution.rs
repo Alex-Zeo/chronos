@@ -13,7 +13,7 @@ pub struct ClaudeSession {
     pub cost_usd: f64,
 }
 
-pub fn attribute_claude_session(session: &ClaudeSession, rate_usd_hr: f64) -> Vec<TimeBlock> {
+pub fn attribute_claude_session(session: &ClaudeSession, _rate_usd_hr: f64) -> Vec<TimeBlock> {
     let now = Utc::now();
     let is_compute_only = matches!(
         session.session_type.as_str(),
