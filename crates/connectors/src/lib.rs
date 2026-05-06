@@ -1,6 +1,7 @@
 pub mod claude;
 pub mod stella;
 pub mod github;
+pub mod gdrive;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
