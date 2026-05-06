@@ -24,6 +24,15 @@ enum Commands {
         #[command(subcommand)]
         action: ReportAction,
     },
+    Demo {
+        #[command(subcommand)]
+        action: DemoAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum DemoAction {
+    Seed,
 }
 
 #[derive(Subcommand)]
@@ -83,6 +92,9 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Demo { action } => match action {
+            DemoAction::Seed => handle_demo_seed(&store),
+        },
     }
 }
 
@@ -190,6 +202,85 @@ fn handle_ingest(since_str: &str, store: &ChronosStore) -> Result<()> {
 
     store.upsert_cursor("claude", &now.to_rfc3339())?;
     println!("  Ingested {ingested} events total");
+    Ok(())
+}
+
+fn handle_demo_seed(store: &ChronosStore) -> Result<()> {
+    use chronos_core::entities::*;
+
+    let now = chrono::Utc::now();
+
+    let client_id = store.insert_client(&Client {
+        id: None, name: "Acme Corp".into(),
+        contact: Some("alice@acme.com".into()),
+        rate_usd_hr: 150.0, created_at: now,
+        notes: Some("Demo client".into()),
+    })?;
+
+    let project_id = store.insert_project(&BillingProject {
+        id: None, client_id, name: "Website Redesign".into(),
+        billing_type: BillingType::Hourly, rate_override: None,
+        budget_hours: Some(80.0), status: ProjectStatus::Active,
+        created_at: now,
+        goals_json: Some(r#"["Redesign homepage","Migrate to Next.js","Launch by Q3"]"#.into()),
+    })?;
+
+    let base = now - chrono::Duration::days(7);
+    let sessions = [
+        ("demo-s1", "User", 0i64, 25i64, 0.45f64),
+        ("demo-s2", "User", 2, 60, 1.20),
+        ("demo-s3", "Hook", 3, 1, 0.01),
+        ("demo-s4", "User", 4, 45, 0.95),
+        ("demo-s5", "Subagent", 4, 10, 0.15),
+    ];
+
+    for (id, stype, day_offset, duration_min, cost) in sessions {
+        let start = base + chrono::Duration::days(day_offset) + chrono::Duration::hours(9);
+        let end = start + chrono::Duration::minutes(duration_min);
+
+        let session = chronos_core::attribution::ClaudeSession {
+            session_id: id.into(), project_id,
+            start, end, session_type: stype.into(), cost_usd: cost,
+        };
+        let blocks = chronos_core::attribution::attribute_claude_session(&session, 150.0);
+        for block in &blocks {
+            store.insert_time_block(block).unwrap();
+        }
+
+        store.insert_activity_event(&ActivityEvent {
+            id: None, source: "claude".into(), source_event_id: id.into(),
+            billing_project_id: Some(project_id),
+            event_type: format!("claude_session_{}", stype.to_lowercase()),
+            timestamp: start, end_timestamp: Some(end),
+            actor: Some("demo-user".into()),
+            summary: Some(format!("{stype} session on Website Redesign")),
+            metadata_json: Some(serde_json::json!({"cost_usd": cost}).to_string()),
+            preliminary_project_id: Some(project_id),
+            needs_llm_review: false, ingested_at: now,
+        })?;
+    }
+
+    let commit_events = vec![
+        chronos_core::windows::PointEvent {
+            timestamp: base + chrono::Duration::days(1) + chrono::Duration::hours(14),
+            source_event_id: "demo-c1".into(),
+        },
+        chronos_core::windows::PointEvent {
+            timestamp: base + chrono::Duration::days(1) + chrono::Duration::hours(14) + chrono::Duration::minutes(5),
+            source_event_id: "demo-c2".into(),
+        },
+    ];
+    let github_blocks = chronos_core::windows::build_continuation_blocks(&commit_events, project_id, "github");
+    for block in &github_blocks {
+        store.insert_time_block(block)?;
+    }
+
+    println!("Demo data seeded:");
+    println!("  Client: Acme Corp ($150/hr)");
+    println!("  Project: Website Redesign (80hr budget)");
+    println!("  {} Claude sessions, {} GitHub commit clusters", sessions.len(), 1);
+    println!("\nTry: chronos project list");
+
     Ok(())
 }
 
