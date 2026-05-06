@@ -11,6 +11,7 @@ path = "src/main.rs"
 chronos-core = { workspace = true }
 chronos-connectors = { workspace = true }
 chronos-report = { workspace = true }
+rusty-data = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
