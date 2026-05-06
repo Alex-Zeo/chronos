@@ -43,7 +43,7 @@ pub fn build_continuation_blocks(
                 source: source.into(),
                 start_ts: block_start,
                 end_ts: end,
-                duration_minutes: duration.max(COMMIT_CLUSTER_MINUTES),
+                duration_minutes: if source == "github" { duration.max(COMMIT_CLUSTER_MINUTES) } else { duration },
                 billing_rate: BillingRate::Active,
                 rate_multiplier: 1.0,
                 cost_usd: None,
@@ -133,6 +133,17 @@ mod tests {
         ];
         let blocks = build_continuation_blocks(&events, 1, "github");
         assert!(blocks[0].duration_minutes >= COMMIT_CLUSTER_MINUTES);
+    }
+
+    #[test]
+    fn non_github_source_gets_raw_duration() {
+        let events = vec![
+            evt("2026-05-06T14:00:00Z", "e1"),
+            evt("2026-05-06T14:00:30Z", "e2"),
+        ];
+        let blocks = build_continuation_blocks(&events, 1, "gdrive");
+        // Raw: (14:00:30 + 30min) - 14:00:00 = 30.5 min, no 5-min floor applied
+        assert!((blocks[0].duration_minutes - 30.5).abs() < 0.01);
     }
 
     #[test]

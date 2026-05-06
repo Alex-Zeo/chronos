@@ -149,7 +149,16 @@ impl ChronosStore {
                 event.ingested_at.to_rfc3339(),
             ],
         )?;
-        Ok(conn.last_insert_rowid())
+        if conn.changes() == 0 {
+            let id = conn.query_row(
+                "SELECT id FROM activity_event WHERE source = ?1 AND source_event_id = ?2",
+                rusty_data::rusqlite::params![event.source, event.source_event_id],
+                |row| row.get::<_, i64>(0),
+            )?;
+            Ok(id)
+        } else {
+            Ok(conn.last_insert_rowid())
+        }
     }
 
     pub fn insert_time_block(&self, block: &crate::entities::TimeBlock) -> Result<i64> {
@@ -272,6 +281,34 @@ mod tests {
         assert_eq!(clients.len(), 1);
         assert_eq!(clients[0].name, "Acme Corp");
         assert_eq!(clients[0].rate_usd_hr, 150.0);
+    }
+
+    #[test]
+    fn duplicate_event_returns_existing_id() {
+        use crate::entities::*;
+        let store = ChronosStore::in_memory().unwrap();
+        let conn = store.connection().lock().unwrap();
+        let now = chrono::Utc::now();
+        conn.execute(
+            "INSERT INTO client (name, rate_usd_hr, created_at) VALUES (?1, ?2, ?3)",
+            rusty_data::rusqlite::params!["Test", 100.0, now.to_rfc3339()],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO billing_project (client_id, name, billing_type, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusty_data::rusqlite::params![1, "Proj", "hourly", now.to_rfc3339()],
+        ).unwrap();
+        drop(conn);
+
+        let event = ActivityEvent {
+            id: None, source: "claude".into(), source_event_id: "s1".into(),
+            billing_project_id: Some(1), event_type: "session".into(),
+            timestamp: now, end_timestamp: None, actor: None, summary: None,
+            metadata_json: None, preliminary_project_id: None,
+            needs_llm_review: false, ingested_at: now,
+        };
+        let first_id = store.insert_activity_event(&event).unwrap();
+        let second_id = store.insert_activity_event(&event).unwrap();
+        assert_eq!(first_id, second_id);
     }
 
     #[test]
