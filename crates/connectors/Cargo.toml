@@ -1,0 +1,15 @@
+[package]
+name = "chronos-connectors"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chronos-core = { workspace = true }
+rusty-data = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
