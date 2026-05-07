@@ -76,6 +76,94 @@ pub fn render_markdown(
     md
 }
 
+pub fn render_html(
+    client_name: &str,
+    project_name: &str,
+    period: &str,
+    summary: &TimeSummary,
+    timeline: &[ActivityEvent],
+    decisions: &[DecisionRecord],
+    parallel_blocks: &[TimeBlock],
+) -> String {
+    let mut html = String::new();
+    html.push_str(r#"<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; color: #1a1a2e; line-height: 1.6; }
+.header { border-bottom: 3px solid #16213e; padding-bottom: 20px; margin-bottom: 30px; }
+.header h1 { margin: 0 0 4px 0; font-size: 28px; color: #16213e; }
+.header .subtitle { color: #555; font-size: 14px; }
+.metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin: 20px 0 30px; }
+.metric-card { background: #f8f9fa; border-radius: 8px; padding: 16px; text-align: center; }
+.metric-card .value { font-size: 28px; font-weight: 700; color: #16213e; }
+.metric-card .label { font-size: 12px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; }
+.metric-card.total { background: #16213e; color: #fff; }
+.metric-card.total .value { color: #fff; }
+.metric-card.total .label { color: #aab; }
+table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+th { background: #f1f3f5; text-align: left; padding: 10px 12px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.3px; color: #555; border-bottom: 2px solid #dee2e6; }
+td { padding: 10px 12px; border-bottom: 1px solid #eee; font-size: 14px; }
+tr:hover td { background: #f8f9fa; }
+h2 { color: #16213e; font-size: 20px; margin-top: 40px; padding-bottom: 8px; border-bottom: 1px solid #eee; }
+.timeline-item { padding: 6px 0; font-size: 13px; }
+.timeline-ts { color: #888; font-family: monospace; }
+.timeline-source { background: #e9ecef; border-radius: 3px; padding: 1px 6px; font-size: 11px; }
+.footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid #eee; color: #999; font-size: 12px; text-align: center; }
+@media print { body { margin: 0; } .metric-grid { break-inside: avoid; } }
+</style></head><body>
+"#);
+
+    html.push_str(&format!(r#"<div class="header"><h1>{client_name} &mdash; {project_name}</h1><div class="subtitle">Billing Report &middot; {period}</div></div>"#));
+
+    html.push_str(r#"<div class="metric-grid">"#);
+    html.push_str(&format!(r#"<div class="metric-card"><div class="value">{:.1}</div><div class="label">Active Hours</div></div>"#, summary.total_active_minutes / 60.0));
+    html.push_str(&format!(r#"<div class="metric-card"><div class="value">{:.1}</div><div class="label">Passive Hours</div></div>"#, summary.total_passive_minutes / 60.0));
+    html.push_str(&format!(r#"<div class="metric-card"><div class="value">{:.2}</div><div class="label">Billable Hours</div></div>"#, summary.billable_hours));
+    html.push_str(&format!(r#"<div class="metric-card total"><div class="value">${:.2}</div><div class="label">Total Cost</div></div>"#, summary.total_cost_usd));
+    html.push_str("</div>");
+
+    if !summary.by_source.is_empty() {
+        html.push_str("<h2>By Source</h2><table><tr><th>Source</th><th>Active</th><th>Passive</th><th>API Cost</th><th>Blocks</th></tr>");
+        for (source, s) in &summary.by_source {
+            html.push_str(&format!("<tr><td>{source}</td><td>{:.1} min</td><td>{:.1} min</td><td>${:.2}</td><td>{}</td></tr>", s.active_minutes, s.passive_minutes, s.compute_cost, s.block_count));
+        }
+        html.push_str("</table>");
+    }
+
+    if !timeline.is_empty() {
+        html.push_str("<h2>Activity Timeline</h2>");
+        let display_count = timeline.len().min(50);
+        for event in &timeline[..display_count] {
+            let ts = event.timestamp.format("%Y-%m-%d %H:%M");
+            let summary_text = event.summary.as_deref().unwrap_or(&event.event_type);
+            html.push_str(&format!(r#"<div class="timeline-item"><span class="timeline-ts">{ts}</span> <span class="timeline-source">{}</span> {summary_text}</div>"#, event.source));
+        }
+        if timeline.len() > 50 {
+            html.push_str(&format!("<p><em>...and {} more events</em></p>", timeline.len() - 50));
+        }
+    }
+
+    if !decisions.is_empty() {
+        html.push_str("<h2>Decision Log</h2>");
+        for (i, d) in decisions.iter().enumerate() {
+            html.push_str(&format!("<h3>Decision {}</h3><p><strong>{}</strong></p>", i + 1, d.summary));
+            if let Some(ref rationale) = d.rationale {
+                html.push_str(&format!("<p><em>{rationale}</em></p>"));
+            }
+        }
+    }
+
+    if !parallel_blocks.is_empty() {
+        html.push_str("<h2>Parallel Sessions</h2><table><tr><th>Label</th><th>Duration</th><th>Cost</th></tr>");
+        for b in parallel_blocks {
+            let label = b.parallel_label.as_deref().unwrap_or("(unlabeled)");
+            html.push_str(&format!("<tr><td>{label}</td><td>{:.1} min</td><td>${:.2}</td></tr>", b.duration_minutes, b.cost_usd.unwrap_or(0.0)));
+        }
+        html.push_str("</table>");
+    }
+
+    html.push_str(r#"<div class="footer">Generated by Chronos</div></body></html>"#);
+    html
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

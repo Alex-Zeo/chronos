@@ -19,6 +19,8 @@ enum Commands {
     Ingest {
         #[arg(long, default_value = "7d")]
         since: String,
+        #[arg(long)]
+        project: Option<String>,
     },
     Report {
         #[command(subcommand)]
@@ -64,8 +66,10 @@ enum ReportAction {
     Generate {
         #[arg(long)]
         project: String,
+        #[arg(long, default_value = "7d")]
+        since: String,
         #[arg(long)]
-        period: String,
+        output: Option<String>,
     },
 }
 
@@ -83,15 +87,12 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Project { action } => handle_project(action, &store),
-        Commands::Ingest { since } => handle_ingest(&since, &store),
-        Commands::Report { action } => {
-            match action {
-                ReportAction::Generate { project, period } => {
-                    println!("Report for {project} period {period} (not yet implemented)");
-                    Ok(())
-                }
+        Commands::Ingest { since, project } => handle_ingest(&since, project.as_deref(), &store),
+        Commands::Report { action } => match action {
+            ReportAction::Generate { project, since, output } => {
+                handle_report(&project, &since, output.as_deref(), &store)
             }
-        }
+        },
         Commands::Demo { action } => match action {
             DemoAction::Seed => handle_demo_seed(&store),
         },
@@ -162,9 +163,18 @@ fn handle_project(action: ProjectAction, store: &ChronosStore) -> Result<()> {
     }
 }
 
-fn handle_ingest(since_str: &str, store: &ChronosStore) -> Result<()> {
+fn handle_ingest(since_str: &str, project_name: Option<&str>, store: &ChronosStore) -> Result<()> {
     let since = parse_since(since_str)?;
-    println!("Ingesting activity since {since}");
+    println!("Ingesting activity since {}", since.format("%Y-%m-%d %H:%M UTC"));
+
+    let project = if let Some(name) = project_name {
+        let projects = store.list_projects(None)?;
+        let p = projects.into_iter().find(|p| p.name == name)
+            .with_context(|| format!("no billing project named '{name}'. Create one first with: chronos project create --client <client> \"{name}\""))?;
+        Some(p)
+    } else {
+        None
+    };
 
     let bloomnet_path = rusty_data::connection::default_bloomnet_path()?;
     if !bloomnet_path.exists() {
@@ -180,28 +190,144 @@ fn handle_ingest(since_str: &str, store: &ChronosStore) -> Result<()> {
 
     let now = chrono::Utc::now();
     let mut ingested = 0;
+    let mut time_blocks = vec![];
+
     for raw in &raw_events {
+        let project_id = project.as_ref().and_then(|p| p.id);
+
         let event = chronos_core::entities::ActivityEvent {
             id: None,
             source: raw.source.clone(),
             source_event_id: raw.source_event_id.clone(),
-            billing_project_id: None,
+            billing_project_id: project_id,
             event_type: raw.event_type.clone(),
             timestamp: raw.timestamp,
             end_timestamp: raw.end_timestamp,
             actor: raw.actor.clone(),
             summary: raw.summary.clone(),
             metadata_json: raw.metadata_json.clone(),
-            preliminary_project_id: None,
+            preliminary_project_id: project_id,
             needs_llm_review: false,
             ingested_at: now,
         };
         store.insert_activity_event(&event)?;
         ingested += 1;
+
+        if let Some(ref proj) = project {
+            let meta: serde_json::Value = serde_json::from_str(
+                raw.metadata_json.as_deref().unwrap_or("{}")
+            ).unwrap_or_default();
+            let session_type = meta["session_type"].as_str().unwrap_or("User");
+            let cost = meta["cost_usd"].as_f64().unwrap_or(0.0);
+
+            let session = chronos_core::attribution::ClaudeSession {
+                session_id: raw.source_event_id.clone(),
+                project_id: proj.id.unwrap(),
+                start: raw.timestamp,
+                end: raw.end_timestamp.unwrap_or(raw.timestamp),
+                session_type: session_type.into(),
+                cost_usd: cost,
+            };
+            let rate = proj.rate_override.unwrap_or(0.0);
+            let blocks = chronos_core::attribution::attribute_claude_session(&session, rate);
+            time_blocks.extend(blocks);
+        }
+    }
+
+    chronos_core::overlap::detect_parallel_claude_sessions(&mut time_blocks);
+
+    let block_count = time_blocks.len();
+    for block in &time_blocks {
+        store.insert_time_block(block)?;
     }
 
     store.upsert_cursor("claude", &now.to_rfc3339())?;
-    println!("  Ingested {ingested} events total");
+    println!("  Ingested {ingested} events, generated {block_count} time blocks");
+    Ok(())
+}
+
+fn handle_report(project_name: &str, since_str: &str, output: Option<&str>, store: &ChronosStore) -> Result<()> {
+    let since = parse_since(since_str)?;
+    let now = chrono::Utc::now();
+
+    let projects = store.list_projects(None)?;
+    let project = projects.iter().find(|p| p.name == project_name)
+        .with_context(|| format!("no billing project named '{project_name}'"))?;
+    let project_id = project.id.unwrap();
+
+    let clients = store.list_clients()?;
+    let client = clients.iter().find(|c| c.id == Some(project.client_id))
+        .context("client not found")?;
+
+    let blocks = store.list_time_blocks_for_project(project_id, since, now)?;
+    let events = store.list_activity_events_for_project(project_id, since, now)?;
+
+    if blocks.is_empty() {
+        println!("No time blocks found for '{project_name}' since {}.", since.format("%Y-%m-%d"));
+        println!("Run: chronos ingest --project \"{project_name}\" --since {since_str}");
+        return Ok(());
+    }
+
+    let rate = project.rate_override.unwrap_or(client.rate_usd_hr);
+    let summary = chronos_report::summary::summarize(&blocks, rate);
+    let parallel_blocks: Vec<_> = blocks.iter().filter(|b| b.parallel_index > 0).cloned().collect();
+    let period = format!("{} to {}", since.format("%Y-%m-%d"), now.format("%Y-%m-%d"));
+
+    println!("  {} time blocks, {:.1} billable hours, ${:.2} total",
+        blocks.len(), summary.billable_hours, summary.total_cost_usd);
+
+    match output {
+        Some(path) if path.ends_with(".pdf") => {
+            let html = chronos_report::renderer::render_html(
+                &client.name, &project.name, &period, &summary, &events, &[], &parallel_blocks,
+            );
+            let abs_pdf = std::fs::canonicalize(".").unwrap().join(path);
+            let html_tmp = abs_pdf.with_extension("tmp.html");
+            std::fs::write(&html_tmp, &html)?;
+
+            let file_url = format!("file://{}", html_tmp.display());
+            let status = std::process::Command::new(
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+            )
+                .args([
+                    "--headless",
+                    "--disable-gpu",
+                    "--no-pdf-header-footer",
+                    &format!("--print-to-pdf={}", abs_pdf.display()),
+                    &file_url,
+                ])
+                .status()?;
+
+            std::fs::remove_file(&html_tmp).ok();
+
+            if status.success() {
+                println!("  PDF saved to {path}");
+            } else {
+                anyhow::bail!("Chrome PDF generation failed (exit {})", status.code().unwrap_or(-1));
+            }
+        }
+        Some(path) if path.ends_with(".html") => {
+            let html = chronos_report::renderer::render_html(
+                &client.name, &project.name, &period, &summary, &events, &[], &parallel_blocks,
+            );
+            std::fs::write(path, &html)?;
+            println!("  HTML saved to {path}");
+        }
+        Some(path) => {
+            let md = chronos_report::renderer::render_markdown(
+                &client.name, &project.name, &period, &summary, &events, &[], &parallel_blocks,
+            );
+            std::fs::write(path, &md)?;
+            println!("  Report saved to {path}");
+        }
+        None => {
+            let md = chronos_report::renderer::render_markdown(
+                &client.name, &project.name, &period, &summary, &events, &[], &parallel_blocks,
+            );
+            println!("{md}");
+        }
+    }
+
     Ok(())
 }
 
@@ -244,7 +370,7 @@ fn handle_demo_seed(store: &ChronosStore) -> Result<()> {
         };
         let blocks = chronos_core::attribution::attribute_claude_session(&session, 150.0);
         for block in &blocks {
-            store.insert_time_block(block).unwrap();
+            store.insert_time_block(block)?;
         }
 
         store.insert_activity_event(&ActivityEvent {

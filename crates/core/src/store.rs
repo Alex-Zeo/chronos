@@ -178,6 +178,66 @@ impl ChronosStore {
         Ok(conn.last_insert_rowid())
     }
 
+    pub fn list_time_blocks_for_project(&self, project_id: i64, start: chrono::DateTime<chrono::Utc>, end: chrono::DateTime<chrono::Utc>) -> Result<Vec<crate::entities::TimeBlock>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, billing_project_id, source, start_ts, end_ts, duration_minutes, billing_rate, rate_multiplier, cost_usd, parallel_index, parallel_total, parallel_label, source_event_ids, computed_at
+             FROM time_block WHERE billing_project_id = ?1 AND start_ts >= ?2 AND start_ts <= ?3 ORDER BY start_ts"
+        )?;
+        let rows = stmt.query_map(
+            rusty_data::rusqlite::params![project_id, start.to_rfc3339(), end.to_rfc3339()],
+            |row| {
+                let br_str: String = row.get(6)?;
+                Ok(crate::entities::TimeBlock {
+                    id: Some(row.get(0)?),
+                    billing_project_id: row.get(1)?,
+                    source: row.get(2)?,
+                    start_ts: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?).unwrap_or_default().with_timezone(&chrono::Utc),
+                    end_ts: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?).unwrap_or_default().with_timezone(&chrono::Utc),
+                    duration_minutes: row.get(5)?,
+                    billing_rate: crate::entities::BillingRate::from_str(&br_str).unwrap_or(crate::entities::BillingRate::Active),
+                    rate_multiplier: row.get(7)?,
+                    cost_usd: row.get(8)?,
+                    parallel_index: row.get(9)?,
+                    parallel_total: row.get(10)?,
+                    parallel_label: row.get(11)?,
+                    source_event_ids: row.get(12)?,
+                    computed_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(13)?).unwrap_or_default().with_timezone(&chrono::Utc),
+                })
+            }
+        )?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn list_activity_events_for_project(&self, project_id: i64, start: chrono::DateTime<chrono::Utc>, end: chrono::DateTime<chrono::Utc>) -> Result<Vec<crate::entities::ActivityEvent>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, source, source_event_id, billing_project_id, event_type, timestamp, end_timestamp, actor, summary, metadata_json, preliminary_project_id, needs_llm_review, ingested_at
+             FROM activity_event WHERE billing_project_id = ?1 AND timestamp >= ?2 AND timestamp <= ?3 ORDER BY timestamp"
+        )?;
+        let rows = stmt.query_map(
+            rusty_data::rusqlite::params![project_id, start.to_rfc3339(), end.to_rfc3339()],
+            |row| {
+                Ok(crate::entities::ActivityEvent {
+                    id: Some(row.get(0)?),
+                    source: row.get(1)?,
+                    source_event_id: row.get(2)?,
+                    billing_project_id: row.get(3)?,
+                    event_type: row.get(4)?,
+                    timestamp: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?).unwrap_or_default().with_timezone(&chrono::Utc),
+                    end_timestamp: row.get::<_, Option<String>>(6)?.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&chrono::Utc))),
+                    actor: row.get(7)?,
+                    summary: row.get(8)?,
+                    metadata_json: row.get(9)?,
+                    preliminary_project_id: row.get(10)?,
+                    needs_llm_review: row.get::<_, i32>(11)? != 0,
+                    ingested_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(12)?).unwrap_or_default().with_timezone(&chrono::Utc),
+                })
+            }
+        )?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
     pub fn upsert_cursor(&self, source: &str, cursor: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let now = chrono::Utc::now().to_rfc3339();
